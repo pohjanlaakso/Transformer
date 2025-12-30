@@ -83,7 +83,7 @@ init_matrix <- function(rows, cols) {
 init_transformer <- function(d_input = 1, d_model = 16, d_ff = 32, seq_len = 4) {
   weights <- list(
     # 1. Embedding (Project GDP scalar -> d_model vector)
-    W_embed = init_matrix(d_input, d_model),
+    W_embed = init_matrix(d_input, d_model), 
     
     # 2. Attention Mechanism (Single Head for simplicity)
     W_Q = init_matrix(d_model, d_model),
@@ -135,9 +135,9 @@ transformer_forward <- function(x, weights, seq_len, return_internals = FALSE) {
   # STEP 2: SELF-ATTENTION
   # ---------------------------------------------------------
   # Create Q, K, V matrices
-  Q <- h %*% weights$W_Q
-  K <- h %*% weights$W_K
-  V <- h %*% weights$W_V
+  Q <- h %*% weights$W_Q # I am looking for a recession
+  K <- h %*% weights$W_K # I am a high-growth quarter
+  V <- h %*% weights$W_V # If you pay attention to me, here is the information I offer! 
   
   # Calculate Scores (Q * K_transpose / sqrt(d_k))
   scores <- (Q %*% t(K)) / sqrt(d_k)
@@ -167,7 +167,7 @@ transformer_forward <- function(x, weights, seq_len, return_internals = FALSE) {
   ffn_hidden <- t(t(h_norm1 %*% weights$W1) + weights$b1)
   
   # ReLU Activation
-  ffn_activated <- relu(ffn_hidden)
+  ffn_activated <- relu(ffn_hidden) # allows the model to learn if-then logic.
   
   # Linear Contraction
   ffn_out <- t(t(ffn_activated %*% weights$W2) + weights$b2)
@@ -380,3 +380,266 @@ cat("   actually relies on to make its prediction.\n")
 "If attention weights are 0.25, 0.25, 0.25, 0.25 the model is acting like a simple
 moving average. If  the weight for the most recent quarter is high, the model is
 momentum. "
+
+# ==============================================================================
+# PART 5: ADVANCED INTERPRETABILITY (SALIENCY & STRESS TESTING)
+# ==============================================================================
+
+# 1. Simple Gradient-based Saliency (Finite Differences)
+# This calculates how sensitive the prediction is to each input quarter.
+get_saliency <- function(x, weights, seq_len, epsilon = 1e-4) {
+  base_pred <- transformer_forward(x, weights, seq_len)
+  saliency <- numeric(length(x))
+  
+  for(i in 1:length(x)) {
+    x_perturbed <- x
+    x_perturbed[i] <- x_perturbed[i] + epsilon
+    new_pred <- transformer_forward(x_perturbed, weights, seq_len)
+    saliency[i] <- (new_pred - base_pred) / epsilon
+  }
+  return(saliency)
+}
+
+# Calculate for the most recent window
+recent_saliency <- get_saliency(last_window, trained_weights, block_size)
+
+# Plotting Saliency
+par(mfrow=c(1,1))
+barplot(recent_saliency, names.arg = paste0("T-", (block_size-1):0),
+        col = ifelse(recent_saliency > 0, "firebrick", "dodgerblue"),
+        main = "Saliency: Sensitivity of Next Prediction",
+        ylab = "Change in Prediction per Unit of Input Change")
+
+cat("\nSaliency Interpretation:\n")
+cat("A large positive bar means increasing that quarter's GDP makes the prediction go UP.\n")
+cat("A negative bar means increasing that quarter's GDP makes the prediction go DOWN.\n")
+
+# ==============================================================================
+# PART 6: NEURON ACTIVATION CLUSTERING
+# ==============================================================================
+
+# 1. Function to extract ReLU activations specifically
+get_ffn_activations <- function(x, weights, seq_len) {
+  x_mat <- matrix(x, ncol = 1)
+  
+  # Forward pass up to the FFN ReLU
+  h <- (x_mat %*% weights$W_embed) + get_positional_encoding(seq_len, ncol(weights$W_embed))
+  
+  # Attention block
+  Q <- h %*% weights$W_Q
+  K <- h %*% weights$W_K
+  V <- h %*% weights$W_V
+  attn_weights <- softmax_matrix((Q %*% t(K)) / sqrt(ncol(weights$W_K)))
+  attn_out <- (attn_weights %*% V) %*% weights$W_O
+  h_norm1 <- layer_norm(h + attn_out, weights$gamma1, weights$beta1)
+  
+  # FFN Expansion and ReLU (This is where the 'neurons' live)
+  ffn_hidden <- t(t(h_norm1 %*% weights$W1) + weights$b1)
+  ffn_activated <- relu(ffn_hidden)
+  
+  # We take the activations of the final time step in the window
+  return(ffn_activated[nrow(ffn_activated), ])
+}
+
+# 2. Collect activations for all training data
+n_samples <- length(X_train)
+d_ff <- length(initial_weights$b1)
+activation_matrix <- matrix(NA, nrow = n_samples, ncol = d_ff)
+
+for(i in 1:n_samples) {
+  activation_matrix[i, ] <- get_ffn_activations(X_train[[i]], trained_weights, block_size)
+}
+
+# 3. Visualization: Heatmap of Neuron Activity
+# This shows which neurons (columns) fire for which time points (rows)
+library(lattice)
+levelplot(t(activation_matrix), 
+          xlab="Neuron Index", ylab="Time Step",
+          main="Neuron Activation Heatmap",
+          col.regions = colorRampPalette(c("white", "orange", "red"))(100))
+
+# 4. Clustering: Which neurons act similarly?
+# We transpose because we want to cluster the NEURONS based on their behavior
+neuron_clusters <- hclust(dist(t(activation_matrix)))
+par(mfrow=c(1,1))
+plot(neuron_clusters, main="Dendrogram of Neuron Functional Clusters", 
+     xlab="Neuron Index", sub="Neurons in the same branch perform similar logic")
+
+cat("\nNeuron Analysis Complete.\n")
+cat("Interpretation:\n")
+cat("- Look at the Heatmap: Vertical white lines indicate 'dead neurons' (never fire).\n")
+cat("- High-activity columns (bright red) are 'generalist' neurons.\n")
+cat("- Sparse columns that only fire at specific times are 'specialist' detectors.\n")
+
+# ==============================================================================
+# PART 7: GLOBAL VS LOCAL SENSITIVITY
+# ==============================================================================
+
+# Calculate saliency for EVERY training sample
+all_saliency <- matrix(NA, nrow = length(X_train), ncol = block_size)
+
+for(i in 1:length(X_train)) {
+  all_saliency[i, ] <- get_saliency(X_train[[i]], trained_weights, block_size)
+}
+
+# Average the absolute sensitivity (Magnitude of impact)
+avg_absolute_saliency <- colMeans(abs(all_saliency))
+
+par(mfrow=c(1,1))
+barplot(avg_absolute_saliency, names.arg = paste0("T-", (block_size-1):0),
+        col = "darkgreen", main = "Global Average Saliency (Importance)",
+        ylab = "Avg Absolute Impact on Prediction")
+
+cat("\nGlobal Saliency Analysis:\n")
+cat("Compare this green barplot to your previous blue Attention barplot.\n")
+cat("If they match, the model is consistent. If T-0 dominates here too,\n")
+cat("it means your model is primarily a 'last-value' predictor despite its attention.\n")
+
+# ==============================================================================
+# PART 8: ATTENTION MECHANISM VISUALISATION
+# ==============================================================================
+
+# Load libraries for visualization
+if(!require(ggplot2)) install.packages("ggplot2")
+if(!require(reshape2)) install.packages("reshape2")
+library(ggplot2)
+library(reshape2)
+
+# Select a specific example (e.g., the last window of your data)
+sample_input <- tail(gdp_data_scaled, block_size)
+
+# Run the model and request internals
+internals <- transformer_forward(sample_input, trained_weights, block_size, return_internals = TRUE)
+attn_matrix <- internals$attention
+
+# Format for plotting
+# Rows: The query position (Current calculation step)
+# Cols: The key position (Which past step we are looking at)
+colnames(attn_matrix) <- paste0("Lag_", block_size:1) # e.g. Lag_4, Lag_3...
+rownames(attn_matrix) <- paste0("Pos_", 1:block_size)
+melted_attn <- melt(attn_matrix)
+
+# Plot
+ggplot(melted_attn, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "#FF5733") +
+  geom_text(aes(label = round(value, 2)), color = "black") +
+  labs(title = "Attention Heatmap: How the Model Weighs History",
+       subtitle = "Row 4 shows the final step used for prediction.",
+       x = "Looking at (Key)",
+       y = "Current Step (Query)",
+       fill = "Weight") +
+  theme_minimal()
+
+# PERMUTATION FEATURE IMPORTANCE
+
+" This explains which time lag is actually driving the prediction. Shuffling
+the data from T-1 ruins the prediction error, thus it is a very important feature."
+
+# Create a data matrix from X_train list for easier manipulation
+X_matrix <- do.call(rbind, X_train) # Shape: (N_samples, block_size)
+Y_vector <- Y_train
+
+# 1. Calculate Baseline Error (MSE)
+baseline_preds <- apply(X_matrix, 1, function(x) transformer_forward(x, trained_weights, block_size))
+baseline_mse <- mean((baseline_preds - Y_vector)^2)
+
+# 2. Permutation Loop
+importance_scores <- numeric(block_size)
+
+for(k in 1:block_size) {
+  # Create a copy and shuffle column k
+  X_permuted <- X_matrix
+  X_permuted[, k] <- sample(X_permuted[, k]) # Shuffle inputs at this lag position
+  
+  # Predict with corrupted data
+  perm_preds <- apply(X_permuted, 1, function(x) transformer_forward(x, trained_weights, block_size))
+  perm_mse <- mean((perm_preds - Y_vector)^2)
+  
+  # Importance = Increase in Error
+  importance_scores[k] <- perm_mse - baseline_mse
+}
+
+# Plot Importance
+imp_df <- data.frame(Lag = paste0("t - ", (block_size):1, " (Old -> New)"), 
+                     Importance = importance_scores)
+
+ggplot(imp_df, aes(x = reorder(Lag, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Feature Importance (Permutation)",
+       subtitle = "Higher bar = Removing this history hurts the model more",
+       x = "Time Lag", y = "Increase in MSE (Loss)") +
+  theme_minimal()
+
+# GLOBAL SURROGATE MODEL
+
+"The transfromer predicts "
+
+if(!require(rpart)) install.packages("rpart")
+if(!require(rpart.plot)) install.packages("rpart.plot")
+library(rpart)
+library(rpart.plot)
+
+# Prepare Data: Inputs vs The Transformer's Predictions (Not the real Y!)
+# We want to explain the MODEL, not the DATA.
+model_preds <- apply(X_matrix, 1, function(x) transformer_forward(x, trained_weights, block_size))
+
+surrogate_data <- as.data.frame(X_matrix)
+colnames(surrogate_data) <- paste0("Lag_", block_size:1) # Lag_4 is oldest
+surrogate_data$Prediction <- model_preds
+
+# Train a shallow decision tree to mimic the transformer
+tree_model <- rpart(Prediction ~ ., data = surrogate_data, method = "anova", 
+                    control = rpart.control(maxdepth = 3)) # Keep it simple
+
+# Visualize the Logic
+rpart.plot(tree_model, 
+           main = "Surrogate Tree: The 'Logic' of the Transformer",
+           box.palette = "RdBu", shadow.col = "gray", nn = TRUE)
+
+cat("Explanation: This tree approximates the non-linear Transformer logic.\n")
+cat("It reveals the decision boundaries the neural network has learned.")
+
+# POSITIONAL ENCODING VISUALISATION
+
+# 1. Set parameters for a clear visualization
+# We use a larger sequence and model dimension to see the patterns
+vis_seq_len <- 50
+vis_d_model <- 64 
+
+# 2. Generate the encoding matrix using your helper function
+pe_matrix <- get_positional_encoding(vis_seq_len, vis_d_model)
+
+# 3. Format data for ggplot
+# Rows = Position in time (0 to 49)
+# Cols = Dimension in the embedding (1 to 64)
+rownames(pe_matrix) <- 0:(vis_seq_len - 1)
+colnames(pe_matrix) <- 1:vis_d_model
+pe_melted <- melt(pe_matrix)
+colnames(pe_melted) <- c("Position", "Dimension", "Value")
+
+# 4. Create the Heatmap (The "Barcode" of Time)
+ggplot(pe_melted, aes(x = Dimension, y = Position, fill = Value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  labs(title = "Positional Encoding Matrix",
+       subtitle = "Sine/Cosine waves create a unique fingerprint for every time step",
+       x = "Embedding Dimension",
+       y = "Time Step (Position in Sequence)") +
+  theme_minimal()
+
+# 5. Line Plot: Visualizing the actual waves
+# Let's look at 4 specific dimensions to see the sine/cosine oscillations
+selected_dims <- c(1, 2, 9, 10)
+pe_lines <- pe_melted[pe_melted$Dimension %in% selected_dims, ]
+
+ggplot(pe_lines, aes(x = Position, y = Value, color = as.factor(Dimension))) +
+  geom_line(size = 1) +
+  facet_wrap(~Dimension, labeller = label_both) +
+  labs(title = "Positional Waves at Different Dimensions",
+       subtitle = "Lower dimensions (left) oscillate faster than higher dimensions",
+       x = "Position (Time)",
+       y = "Encoding Value",
+       color = "Dim") +
+  theme_light()
